@@ -1,0 +1,380 @@
+---
+title: "How the COVID-19 Pandemic Affected Population Trends in the United States"
+name: "Tristan Lupinski"
+output: pdf_document
+date: "2023-07-09"
+---
+
+```{r} setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(data.table)
+library(tidyverse)
+library(lme4)
+library(corrplot)
+library(MASS)
+library(leaps)
+library(car)
+library(vcd)
+library(ggrepel)
+```
+
+```{r}
+# Load and clean data.
+
+### Population data
+# https://www2.census.gov/programs-surveys/popest/datasets/2020-2022/state/totals/NST-EST2022-ALLDATA.csv
+# https://www2.census.gov/programs-surveys/popest/technical-documentation/file-layouts/2020-2022/NST-EST2022-ALLDATA.pdf
+
+population_data_df = read.csv('/Users/tristanlupinski/Documents/USCensusBureauDemographicPopulationData.csv', sep=',')
+population_data_df <- population_data_df[population_data_df$SUMLEV == 40,] # state-level only
+population_data_df = subset(population_data_df, select = -c(SUMLEV, DIVISION, RESIDUAL2020, RESIDUAL2021, RESIDUAL2022))
+
+
+#### COVID cases data
+# https://raw.githubusercontent.com/nytimes/covid-19-data/master/us-states.csv
+
+covid_cases_df = read.csv('/Users/tristanlupinski/Documents/USCovidCasesData.csv', sep=',')
+
+covid_cases_df <- covid_cases_df[covid_cases_df$date %in% c('2020-07-01','2021-07-01','2022-07-01'),]
+split_covid_cases_df <- split(covid_cases_df, f = covid_cases_df$date)
+
+covid_cases_070120 <- split_covid_cases_df[[1]]
+covid_cases_070121 <- split_covid_cases_df[[2]]
+covid_cases_070122 <- split_covid_cases_df[[3]]
+
+covid_cases_df_join <- merge(x=covid_cases_070120, y=covid_cases_070121, by = 'state', all.x = TRUE)
+covid_cases_df_join2 <- merge(x=covid_cases_df_join, y=covid_cases_070122, by.x = 'state', by.y = 'state', all.x = TRUE)
+
+covid_cases_df= subset(covid_cases_df_join2, select = -c(fips.x, fips.y))
+setnames(covid_cases_df, old = c('cases.x','cases.y','cases','deaths.x','deaths.y','deaths'), 
+                          new = c('cases070120','cases070121','cases070122','deaths070120','deaths070121','deaths070122'))
+covid_cases_df= subset(covid_cases_df, select = -c(date.x, date.y, date))
+covid_cases_df  <- covid_cases_df [, c(6, 1, 2, 4, 7, 3, 5, 8)]
+
+### COVID vaccinations data
+# https://www.kaggle.com/datasets/paultimothymooney/usa-covid19-vaccinations/download?datasetVersionNumber=420
+
+covid_vax_df = read.csv('/Users/tristanlupinski/Documents/USVaccinationData.csv', sep=',')
+
+covid_vax_df= subset(covid_vax_df, select = -c(total_vaccinations, total_distributed, people_vaccinated,
+                                                people_fully_vaccinated, total_vaccinations_per_hundred,
+                                                distributed_per_hundred, daily_vaccinations, daily_vaccinations_raw,
+                                                daily_vaccinations_per_million, share_doses_used, total_boosters,
+                                                total_boosters_per_hundred))
+
+covid_vax_df <- covid_vax_df[covid_vax_df$date %in% c('2021-07-01','2022-06-29'),] 
+
+# Impute missing values by taking mean of 2 closest nearby values above and below
+covid_vax_df$people_fully_vaccinated_per_hundred[covid_vax_df$date == '2022-06-29' & covid_vax_df$location == 'Utah'] <- (64.81 + 64.63) / 2
+covid_vax_df$people_vaccinated_per_hundred[covid_vax_df$date == '2022-06-29' & covid_vax_df$location == 'Utah'] <- (72.49 + 72.77) / 2
+
+covid_vax_df$people_fully_vaccinated_per_hundred[covid_vax_df$date == '2022-06-29' & covid_vax_df$location == 'Idaho'] <- (54.68 + 54.89) / 2
+covid_vax_df$people_vaccinated_per_hundred[covid_vax_df$date == '2022-06-29' & covid_vax_df$location == 'Idaho'] <- (61.8 + 62.17) / 2
+
+covid_vax_df$people_fully_vaccinated_per_hundred[covid_vax_df$date == '2022-06-29' & covid_vax_df$location == 'New Hampshire'] <- (63.96 + 69.04) / 2
+covid_vax_df$people_vaccinated_per_hundred[covid_vax_df$date == '2022-06-29' & covid_vax_df$location == 'New Hampshire'] <- (84 + 84) / 2
+
+covid_vax_df$people_fully_vaccinated_per_hundred[covid_vax_df$date == '2022-06-29' & covid_vax_df$location == 'Texas'] <- (61.42+ 61.42) / 2
+covid_vax_df$people_vaccinated_per_hundred[covid_vax_df$date == '2022-06-29' &covid_vax_df$location == 'Texas'] <- (73.11 + 73.94) / 2
+
+split_covid_vax_df <- split(covid_vax_df, f = covid_vax_df$date)
+covid_vax_070121 <- split_covid_vax_df[[1]]
+covid_vax_062922 <- split_covid_vax_df[[2]]
+covid_vax_df_join <- merge(x=covid_vax_070121, y=covid_vax_062922, by = 'location', all.x = TRUE)
+
+setnames(covid_vax_df_join, old = c('people_fully_vaccinated_per_hundred.x','people_vaccinated_per_hundred.x','people_fully_vaccinated_per_hundred.y','people_vaccinated_per_hundred.y'), 
+         new = c('people_fully_vaccinated_per_hundred_070121','people_vaccinated_per_hundred_070121','people_fully_vaccinated_per_hundred_062922','people_vaccinated_per_hundred_062922'))
+
+covid_vax_df_join = subset(covid_vax_df_join, select = -c(date.x, date.y))
+covid_vax_df_join$location[covid_vax_df_join$location == 'New York State'] <- 'New York'
+
+### Mask mandate data
+# https://www.kaggle.com/datasets/manuvarghese98/impact-of-mask-mandate-on-covid19
+
+mask_df = read.csv('/Users/tristanlupinski/Documents/USMaskMandateData.csv', sep=',')
+
+mask_df = subset(mask_df, select = -c(Mask_Mandate))
+mask_df <- mask_df %>% rename(maskMandateMandatory = Mandatory)
+```
+
+```{r}
+# Join datasets.
+
+join_tables_df <- merge(x=population_data_df, y=covid_cases_df , by.x = 'NAME', by.y = 'state', all.x = TRUE)
+join_tables_df_2 <- merge(x=join_tables_df, y=covid_vax_df_join , by.x = 'NAME', by.y = 'location', all.x = TRUE)
+join_tables_df_3 <- merge(x=join_tables_df_2, y=mask_df , by.x = 'NAME', by.y = 'STATE_NAME', all.x = TRUE)
+
+join_tables_df_3  <- join_tables_df_3[join_tables_df_3$NAME != 'Puerto Rico',]
+
+join_tables_df_3 <- join_tables_df_3 %>% rename(npopchg2020 = NPOPCHG_2020, 
+                                          npopchg2021 = NPOPCHG_2021,
+                                          npopchg2022 = NPOPCHG_2022,
+                                          covidcases2020 = cases070120, 
+                                          covidcases2021 = cases070121,
+                                          covidcases2022 = cases070122,
+                                          coviddeaths2020 = deaths070120,
+                                          coviddeaths2021 = deaths070121,
+                                          coviddeaths2022 = deaths070122,
+                                          fullvaxrate2021 = people_fully_vaccinated_per_hundred_070121,
+                                          vaxrate2021 = people_vaccinated_per_hundred_070121,
+                                          fullvaxrate2022 = people_fully_vaccinated_per_hundred_062922,
+                                          vaxrate2022 = people_vaccinated_per_hundred_062922,
+                                          state_id = STATE,
+                                          state = NAME,
+                                          region = REGION,
+                                          estimatesbase2020 = ESTIMATESBASE2020)
+
+data = subset(join_tables_df_3, select = -c(fips))
+
+# Change granularity of rows from state to state and year.
+data_long <- data %>% pivot_longer(cols = !c('state', 'region', 'state_id', 'estimatesbase2020', 'maskMandateMandatory', 'State_Abrv'),
+                                   names_to = c('.value', 'YEAR'),
+                                   names_pattern = '([A-Za-z]+)([0-9]+)') %>%
+                                    relocate(YEAR, .after = state)
+
+# Update variable types.
+data_long$YEAR <- as.factor(data_long$YEAR)
+data_long$region <- factor(data_long$region, levels=c('1','2','3', '4'),
+  labels=c('Northeast','Midwest','South', 'West'))
+data_long$state_id <- as.factor(data_long$state_id)
+data_long$estimatesbase2020 <- as.numeric(data_long$estimatesbase2020)
+
+data_long <- data_long %>% mutate(covidcaserate = covidcases / POPESTIMATE, coviddeathrate = coviddeaths / POPESTIMATE)
+
+# Standardize variables
+data_long <- data_long %>% mutate(basepop_std = scale(estimatesbase2020), covidcaserate_std = scale(covidcaserate), coviddeathrate_std = scale(coviddeathrate),
+                                  fullvaxrate_std = scale(fullvaxrate), vaxrate_std = scale(vaxrate))
+
+data_long  <- data_long[data_long$YEAR != '2020',]
+
+data_long <- data_long %>% rename(year = YEAR, 
+                                    popestimate = POPESTIMATE,
+                                    births = BIRTHS,
+                                    deaths = DEATHS,
+                                    naturalchg = NATURALCHG,
+                                    internationalmig = INTERNATIONALMIG,
+                                    domesticmig = DOMESTICMIG,
+                                    netmig = NETMIG,
+                                    rbirth = RBIRTH,
+                                    rdeath = RDEATH,
+                                    rnaturalchg = RNATURALCHG,
+                                    rinternationalmig = RINTERNATIONALMIG,
+                                    rdomesticmig = RDOMESTICMIG,
+                                    rnetmig = RNETMIG)
+
+data_long <- data_long %>% relocate(state_id)
+
+# Convert categorical columns into multiple binary columns for easier model interpretation.
+df_year_cat = data.frame(model.matrix(~ data_long$year-1, data=data_long))
+df_region_cat = data.frame(model.matrix(~ data_long$region-1, data=data_long))
+
+cat_data = cbind(data_long, df_year_cat)
+cat_data = cbind(cat_data, df_region_cat)
+
+cat_data = subset(cat_data, select = -c(data_long.year2020))
+
+final_df <- cat_data %>% rename(year2021 = data_long.year2021,
+                                year2022 = data_long.year2022,
+                                regionNortheast = data_long.regionNortheast,
+                                regionMidwest = data_long.regionMidwest,
+                                regionSouth = data_long.regionSouth,
+                                regionWest = data_long.regionWest)
+
+columns_to_factor = c('year2021', 'year2022', 'regionNortheast', 'regionMidwest', 'regionSouth', 'regionWest', 'maskMandateMandatory')
+final_df <- final_df %>%
+  mutate(across(columns_to_factor, as.factor))
+                              
+```
+
+```{r}
+# Correlation matrices
+
+par(mfrow=c(1,3))
+
+corplot2021 <- cor(final_df %>% filter(year == '2021') %>% dplyr::select(-c('state', 'region', 'state_id', 'year', 'covidcases', 'coviddeaths', 'births', 'deaths', 'naturalchg', 'internationalmig', 'domesticmig', 'netmig', 'npopchg', 'fullvaxrate', 'vaxrate', 'covidcaserate', 'coviddeathrate', 'year2021', 'year2022', 'regionNortheast', 'regionMidwest', 'regionSouth', 'regionWest', 'maskMandateMandatory')))
+corrplot(corplot2021, title = '7/1/20-6/30/21', mar=c(0,0,1,0))
+
+corplot2022 <- cor(final_df %>% filter(year == '2022') %>% dplyr::select(-c('state', 'region', 'state_id', 'year', 'covidcases', 'coviddeaths', 'births', 'deaths', 'naturalchg', 'internationalmig', 'domesticmig', 'netmig', 'npopchg', 'fullvaxrate', 'vaxrate', 'covidcaserate', 'coviddeathrate', 'year2021', 'year2022', 'regionNortheast', 'regionMidwest', 'regionSouth', 'regionWest', 'maskMandateMandatory')))
+corrplot(corplot2022, title = '7/1/21-6/30/22', mar=c(0,0,1,0))
+
+corplot <- cor(final_df %>% dplyr::select(-c('state', 'region', 'state_id', 'year', 'covidcases', 'coviddeaths', 'births', 'deaths', 'naturalchg', 'internationalmig', 'domesticmig', 'netmig', 'npopchg', 'fullvaxrate', 'vaxrate', 'covidcaserate', 'coviddeathrate', 'year2021', 'year2022', 'regionNortheast', 'regionMidwest', 'regionSouth', 'regionWest', 'maskMandateMandatory')))
+corrplot(corplot, title = '7/1/20-6/30/22', mar=c(0,0,1,0))
+```
+
+```{r}
+# Poisson regression exploration
+
+# Linear mixed model with a log link function and a random slope and intercept for state
+# Potential model specification: https://rpubs.com/Carmen_Aguilar/probability-poisson
+
+###BIRTHS MODEL###
+births_poisson_model <- glmer(births ~ region + coviddeathrate_std + vaxrate_std + covidcaserate_std + fullvaxrate_std + year + maskMandateMandatory +
+                          (1 | state_id) + #random intercept and slope
+                          offset(log(popestimate)),
+                          data = final_df, 
+                          family = poisson,
+                          control = glmerControl(optimizer="bobyqa", optCtrl = list(maxfun=1000000)))
+summary(births_poisson_model)
+
+####DEATHS MODEL###
+deaths_poisson_model <- glmer(deaths ~ region + coviddeathrate_std + vaxrate_std + covidcaserate_std + fullvaxrate_std + year + maskMandateMandatory +
+                        (1 | state_id) + #random intercept and slope
+                        offset(log(popestimate)),
+                        data = final_df, 
+                        family = poisson,
+                        control = glmerControl(optimizer="bobyqa", optCtrl = list(maxfun=1000000)))
+summary(deaths_poisson_model)
+
+# Goodness of fit tests
+gf_birth = vcd::goodfit(final_df$births, type="poisson", method="ML")
+gf_death = vcd::goodfit(final_df$deaths, type="poisson", method="ML")
+
+summary(gf_birth)
+summary(gf_death)
+```
+
+```{r}
+# Normality visualization for demographic population change rates
+par(mfrow=c(2,2))
+boxplot(final_df$rbirth)
+boxplot(final_df$rdeath)
+boxplot(final_df$rdomesticmig)
+boxplot(final_df$rinternationalmig)
+```
+
+
+
+
+```{r}
+###BIRTH RATE MODEL###
+
+# regsubsets model selection
+rbirth_best_subset <- regsubsets(rbirth ~ year2021 + year2022 + regionNortheast + regionMidwest + regionSouth + regionWest + basepop_std + maskMandateMandatory + covidcaserate_std + coviddeathrate_std + fullvaxrate_std + vaxrate_std, data = final_df, nbest = 1, nvmax = NULL, force.in = NULL, force.out = NULL, method = 'exhaustive')
+
+summary_rbirth_best_subset <- summary(rbirth_best_subset)
+as.data.frame(summary_rbirth_best_subset$outmat)
+
+which.max(summary_rbirth_best_subset$adjr2)
+summary_rbirth_best_subset$which[which.max(summary_rbirth_best_subset$adjr2),]
+
+# stepAIC model selection
+fit_birth <- glm(rbirth ~ year2021 + year2022 + regionNortheast + regionMidwest + regionSouth + regionWest + basepop_std + maskMandateMandatory + covidcaserate_std + coviddeathrate_std + fullvaxrate_std + vaxrate_std, data = final_df)
+step_birth <- stepAIC(fit_birth, direction="both")
+step_birth$anova
+
+# Final model
+best_rbirth_model <- lm(rbirth ~ regionNortheast + regionWest + covidcaserate_std + coviddeathrate_std + fullvaxrate_std, data = final_df)
+summary(best_rbirth_model)
+
+# Check assumptions
+vif(best_rbirth_model)
+rbirth_model_residuals = best_rbirth_model$residuals
+hist(rbirth_model_residuals)
+```
+
+```{r}
+###DEATH RATE MODEL###
+
+# regsubsets
+rdeath_best_subset <- regsubsets(rdeath ~ year2021 + year2022 + regionNortheast + regionMidwest + regionSouth + regionWest + basepop_std + maskMandateMandatory + covidcaserate_std + coviddeathrate_std + fullvaxrate_std + vaxrate_std, data = final_df, nbest = 1, nvmax = NULL, force.in = NULL, force.out = NULL, method = 'exhaustive')
+
+summary_rdeath_best_subset <- summary(rdeath_best_subset)
+as.data.frame(summary_rdeath_best_subset$outmat)
+
+which.max(summary_rdeath_best_subset$adjr2)
+summary_rdeath_best_subset$which[which.max(summary_rdeath_best_subset$adjr2),]
+
+# stepAIC
+fit_death <- glm(rdeath ~ year2021 + year2022 + regionNortheast + regionMidwest + regionSouth + regionWest + basepop_std + maskMandateMandatory + covidcaserate_std + coviddeathrate_std + fullvaxrate_std + vaxrate_std, data = final_df)
+step_death <- stepAIC(fit_death, direction="both")
+step_death$anova # display results 
+
+# Best model
+best_rdeath_model <- lm(rdeath ~ year + regionMidwest + regionWest + basepop_std + covidcaserate_std + coviddeathrate_std + vaxrate_std, data = final_df)
+summary(best_rdeath_model)
+
+# Check assumptions
+vif(best_rdeath_model)
+rdeath_model_residuals = best_rdeath_model$residuals
+hist(rdeath_model_residuals)
+
+# Vaccination rate vs death rate
+
+ggplot(data = final_df, aes(x = vaxrate, y = rdeath, color = year)) +
+        geom_point(aes(color = year), size = .005) +
+        geom_text(aes(label=State_Abrv), size = 3) + 
+        #geom_label_repel(aes(label = State_Abrv)) +
+        scale_color_manual(values = c('red','blue')) +
+        geom_smooth(method = 'lm', se = FALSE) +
+        xlab('COVID-19 Vaccination Rate') +
+        ylab('Death Rate') +
+        theme_bw()
+```
+
+```{r}
+###DOMESTIC MIGRATION RATE MODEL###
+
+# regsubsets
+rdomesticmig_best_subset <- regsubsets(rdomesticmig ~ year2021 + year2022 + regionNortheast + regionMidwest + regionSouth + regionWest + basepop_std + maskMandateMandatory + covidcaserate_std + coviddeathrate_std + fullvaxrate_std + vaxrate_std, data = final_df, nbest = 1, nvmax = NULL, force.in = NULL, force.out = NULL, method = 'exhaustive')
+
+summary_rdomesticmig_best_subset <- summary(rdomesticmig_best_subset)
+as.data.frame(summary_rdomesticmig_best_subset$outmat)
+
+which.max(summary_rdomesticmig_best_subset$adjr2)
+summary_rdomesticmig_best_subset$which[which.max(summary_rdomesticmig_best_subset$adjr2),]
+
+# stepAIC
+fit_domesticmig <- glm(rdomesticmig ~ year2021 + year2022 + regionNortheast + regionMidwest + regionSouth + regionWest + basepop_std + maskMandateMandatory + covidcaserate_std + coviddeathrate_std + fullvaxrate_std + vaxrate_std, data = final_df)
+step_domesticmig <- stepAIC(fit_domesticmig, direction="both")
+step_domesticmig$anova # display results 
+
+# Best model
+best_rdomesticmig_model <- lm(rdomesticmig ~ year + regionMidwest + basepop_std + maskMandateMandatory + fullvaxrate_std + covidcaserate_std, data = final_df)
+summary(best_rdomesticmig_model)
+
+# Check assumptions
+vif(best_rdomesticmig_model)
+rdomesticmig_model_residuals = best_rdomesticmig_model$residuals
+hist(rdomesticmig_model_residuals)
+```
+
+```{r}
+###INTERNATIONAL MIGRATION RATE MODEL###
+
+# regsubsets
+rinternationalmig_best_subset <- regsubsets(rinternationalmig ~ year2021 + year2022 + regionNortheast + regionMidwest + regionSouth + regionWest + basepop_std + maskMandateMandatory + covidcaserate_std + coviddeathrate_std + fullvaxrate_std + vaxrate_std, data = final_df, nbest = 1, nvmax = NULL, force.in = NULL, force.out = NULL, method = 'exhaustive')
+
+summary_rinternationalmig_best_subset <- summary(rinternationalmig_best_subset)
+#as.data.frame(summary_rinternationalmig_best_subset$outmat)
+
+which.max(summary_rinternationalmig_best_subset$adjr2)
+summary_rinternationalmig_best_subset$which[which.max(summary_rinternationalmig_best_subset$adjr2),]
+
+# stepAIC
+fit_internationalmig <- glm(rinternationalmig ~ year2021 + year2022 + regionNortheast + regionMidwest + regionSouth + regionWest + basepop_std + maskMandateMandatory + covidcaserate_std + coviddeathrate_std + fullvaxrate_std + vaxrate_std, data = final_df)
+step_internationalmig <- stepAIC(fit_internationalmig, direction="both")
+step_internationalmig$anova # display results 
+
+# Best model
+best_rinternationalmig_model <- lm(rinternationalmig ~ year + regionNortheast + basepop_std + maskMandateMandatory + vaxrate_std, data = final_df)
+summary(best_rinternationalmig_model)
+
+# Check assumptions
+vif(best_rinternationalmig_model)
+rinternationalmig_model_residuals = best_rinternationalmig_model$residuals
+hist(rinternationalmig_model_residuals)
+
+ggplot(data = final_df, aes(x = vaxrate, y = rinternationalmig, color = year)) +
+        geom_point(aes(color = year), size = .005) +
+        geom_text(aes(label=State_Abrv), size = 3) + 
+        #geom_label_repel(aes(label = State_Abrv)) +
+        scale_color_manual(values = c('red','blue')) +
+        geom_smooth(method = 'lm', se = FALSE) +
+        xlab('COVID-19 Vaccination Rate') +
+        ylab('International Migration Rate') +
+        theme_bw()
+```
